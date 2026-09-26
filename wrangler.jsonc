@@ -19,7 +19,7 @@
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "cloudflare-urlproxy",
+	"name": "cloudflare-download",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-09-25",
 	// 可观测性默认全部关闭; 生产部署如需日志与错误堆栈还原, 在临时配置中开启
@@ -41,7 +41,7 @@
 	// 自定义域名 (示例占位, 部署时在临时配置中替换为你自己的域名)
 	// custom domains (example placeholder; replace with your own in the throwaway config)
 	// https://developers.cloudflare.com/workers/configuration/routing/custom-domains/
-	"routes": [{ "pattern": "proxy.example.com", "custom_domain": true }],
+	"routes": [{ "pattern": "dl.drcloud.com.cn", "custom_domain": true }],
 
 	/**
 	 * 环境变量 (vars 明文, 机密一律用 secret) / environment variables (vars are plaintext; secrets are for sensitive data)
