@@ -1,0 +1,241 @@
+import { env, SELF, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import worker from "../src/index";
+
+const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
+
+const TOKEN = "unit-test-token";
+const PROXY_ORIGIN = "https://proxy.example.com";
+
+// wrangler types 会把 vars 值字面量化为 `""`, 测试注入任意运行时字符串时需要断言回 Env
+const TEST_ENV = { ...env, PROXY_TOKEN: TOKEN, ALLOWED_ORIGINS: "" } as unknown as Env;
+
+// ---------------------------------------------------------------------------
+// 出站 fetch mock: unit 风格测试与被测 worker 运行在同一 isolate,
+// 直接替换 globalThis.fetch 即可拦截 worker 发出的子请求。
+// ---------------------------------------------------------------------------
+type BackendHandler = (req: Request) => Response;
+let backendHandler: BackendHandler | null = null;
+let outboundRequests: Request[] = [];
+const realFetch = globalThis.fetch;
+
+beforeEach(() => {
+	backendHandler = null;
+	outboundRequests = [];
+	globalThis.fetch = ((input: unknown, init?: RequestInit) => {
+		const req = input instanceof Request ? input : new Request(input as string, init);
+		outboundRequests.push(req);
+		const handler = backendHandler;
+		if (!handler) throw new Error(`unexpected outbound fetch: ${req.method} ${req.url}`);
+		return Promise.resolve(handler(req));
+	}) as typeof fetch;
+});
+
+afterEach(() => {
+	globalThis.fetch = realFetch;
+});
+
+function lastOutbound(): Request {
+	return outboundRequests[outboundRequests.length - 1];
+}
+
+async function callProxy(
+	url: string,
+	init?: RequestInit<IncomingRequestCfProperties<unknown>>,
+	envOverride: Env = TEST_ENV,
+): Promise<Response> {
+	const request = new IncomingRequest(url, init);
+	const ctx = createExecutionContext();
+	const response = await worker.fetch(request, envOverride, ctx);
+	await waitOnExecutionContext(ctx);
+	return response;
+}
+
+describe("urlproxy worker", () => {
+	it("returns 204 for /favicon.ico without a token (integration)", async () => {
+		const response = await SELF.fetch("https://proxy.example.com/favicon.ico");
+		expect(response.status).toBe(204);
+	});
+
+	it("rejects every proxy request when PROXY_TOKEN is not configured (fail-closed)", async () => {
+		const emptyEnv = { ...env, PROXY_TOKEN: "", ALLOWED_ORIGINS: "" } as unknown as Env;
+		const response = await callProxy(`${PROXY_ORIGIN}/https://example.com/`, undefined, emptyEnv);
+		expect(response.status).toBe(503);
+	});
+
+	it("rejects requests without a token", async () => {
+		const response = await callProxy(`${PROXY_ORIGIN}/https://example.com/`);
+		expect(response.status).toBe(403);
+	});
+
+	it("rejects requests with a wrong token", async () => {
+		const response = await callProxy(`${PROXY_ORIGIN}/https://example.com/`, {
+			headers: { "x-proxy-token": "wrong-token" },
+		});
+		expect(response.status).toBe(403);
+	});
+
+	it("forwards to the destination with a valid header token, stripping cookies and the token itself", async () => {
+		backendHandler = () => new Response("ok", { headers: { "content-type": "application/octet-stream" } });
+		const response = await callProxy(`${PROXY_ORIGIN}/https://api.example.com/v1/data?x=1`, {
+			headers: {
+				"x-proxy-token": TOKEN,
+				cookie: "session=leak-me",
+				authorization: "Bearer dst-token",
+			},
+		});
+		expect(response.status).toBe(200);
+		expect(new TextDecoder().decode(await response.arrayBuffer())).toBe("ok");
+		expect(outboundRequests).toHaveLength(1);
+		const out = lastOutbound();
+		expect(out.url).toBe("https://api.example.com/v1/data?x=1");
+		expect(out.headers.get("host")).toBe("api.example.com");
+		// 安全修复: 代理域 Cookie 与访问令牌不得转发给目标
+		expect(out.headers.get("cookie")).toBeNull();
+		expect(out.headers.get("x-proxy-token")).toBeNull();
+		// Authorization 是客户端显式提供的凭证, 保留转发
+		expect(out.headers.get("authorization")).toBe("Bearer dst-token");
+	});
+
+	it("accepts a token via query parameter and strips it from the destination URL", async () => {
+		backendHandler = () => new Response("ok", { headers: { "content-type": "application/octet-stream" } });
+		const response = await callProxy(`${PROXY_ORIGIN}/https://api.example.com/v1/data?x=1&__proxy_token=${TOKEN}`);
+		expect(response.status).toBe(200);
+		expect(lastOutbound().url).toBe("https://api.example.com/v1/data?x=1");
+	});
+
+	it("returns 400 when the destination is not an absolute http(s) URL", async () => {
+		const response = await callProxy(`${PROXY_ORIGIN}/example.com/foo`, {
+			headers: { "x-proxy-token": TOKEN },
+		});
+		expect(response.status).toBe(400);
+	});
+
+	it("returns 400 for non-http schemes such as ftp", async () => {
+		const response = await callProxy(`${PROXY_ORIGIN}/ftp://example.com/file`, {
+			headers: { "x-proxy-token": TOKEN },
+		});
+		expect(response.status).toBe(400);
+	});
+
+	it("returns 400 for proxy loop destinations (destination host equals proxy host)", async () => {
+		const response = await callProxy(`${PROXY_ORIGIN}/https://proxy.example.com/anything`, {
+			headers: { "x-proxy-token": TOKEN },
+		});
+		expect(response.status).toBe(400);
+	});
+
+	it("passes bodies through unmodified in /~~/ original mode and strips Set-Cookie", async () => {
+		const body = '<a href="https://example.com/page">link</a>';
+		backendHandler = () =>
+			new Response(body, {
+				headers: {
+					"content-type": "text/html",
+					"set-cookie": "session=evil; Path=/",
+					"content-security-policy": "script-src 'self'",
+				},
+			});
+		const response = await callProxy(`${PROXY_ORIGIN}/~~/https://example.com/page`, {
+			headers: { "x-proxy-token": TOKEN },
+		});
+		expect(response.status).toBe(200);
+		// 原样直通, body 不被改写
+		expect(await response.text()).toBe(body);
+		// 安全修复: 不透传目标的 Set-Cookie, 避免多目标共享代理域 cookie jar
+		expect(response.headers.get("set-cookie")).toBeNull();
+		// CSP 始终替换为受限版本 (frame-ancestors 是本代理 CSP 模板的特有指令)
+		expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+		expect(response.headers.get("cache-control")).toBe("no-store");
+	});
+
+	it("rewrites absolute, path-relative and protocol-relative URLs, stripping stale encoding headers", async () => {
+		const body = 'src="https://cdn.example.com/a.js" href="/x" alt="//proto.example.com/y"';
+		backendHandler = () =>
+			new Response(body, {
+				headers: {
+					"content-type": "text/html",
+					"content-encoding": "gzip",
+					"content-length": "999",
+				},
+			});
+		const response = await callProxy(`${PROXY_ORIGIN}/https://example.com/page`, {
+			headers: { "x-proxy-token": TOKEN },
+		});
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe(
+			'src="https://proxy.example.com/https://cdn.example.com/a.js" ' +
+				'href="https://proxy.example.com/https://example.com/x" ' +
+				'alt="https://proxy.example.com/https://proto.example.com/y"',
+		);
+		// 过期的 content-encoding / content-length 不得残留在重写后的响应里
+		expect(response.headers.get("content-encoding")).toBeNull();
+		expect(response.headers.get("content-length")).toBeNull();
+	});
+
+	it("keeps content-encoding for pass-through (non-text) responses", async () => {
+		backendHandler = () =>
+			new Response("binary", {
+				headers: { "content-type": "application/octet-stream", "content-encoding": "gzip" },
+			});
+		const response = await callProxy(`${PROXY_ORIGIN}/https://example.com/blob`, {
+			headers: { "x-proxy-token": TOKEN },
+		});
+		expect(response.headers.get("content-encoding")).toBe("gzip");
+	});
+
+	it("does not crash when the backend response has no content-type header", async () => {
+		backendHandler = () => new Response("plain");
+		const response = await callProxy(`${PROXY_ORIGIN}/https://example.com/noct`, {
+			headers: { "x-proxy-token": TOKEN },
+		});
+		expect(response.status).toBe(200);
+		expect(new TextDecoder().decode(await response.arrayBuffer())).toBe("plain");
+	});
+
+	it("sets CORS headers only for the proxy origin or the configured allowlist", async () => {
+		backendHandler = () => new Response("ok", { headers: { "content-type": "application/octet-stream" } });
+		const withOrigin = async (origin: string) =>
+			callProxy(`${PROXY_ORIGIN}/https://example.com/`, {
+				headers: { "x-proxy-token": TOKEN, origin },
+			});
+		expect((await withOrigin(PROXY_ORIGIN)).headers.get("access-control-allow-origin")).toBe(PROXY_ORIGIN);
+		expect((await withOrigin("https://evil.example.com")).headers.get("access-control-allow-origin")).toBeNull();
+		const noOrigin = await callProxy(`${PROXY_ORIGIN}/https://example.com/`, {
+			headers: { "x-proxy-token": TOKEN },
+		});
+		expect(noOrigin.headers.get("access-control-allow-origin")).toBeNull();
+	});
+
+	it("always applies a restrictive CSP even when the destination has none", async () => {
+		backendHandler = () => new Response("x", { headers: { "content-type": "text/html" } });
+		const response = await callProxy(`${PROXY_ORIGIN}/https://example.com/`, {
+			headers: { "x-proxy-token": TOKEN },
+		});
+		const csp = response.headers.get("content-security-policy");
+		expect(csp).toContain("frame-ancestors 'none'");
+		expect(csp).toContain("script-src 'unsafe-inline'");
+	});
+
+	it("forwards the request method and body", async () => {
+		backendHandler = () => new Response("created", { status: 201 });
+		const response = await callProxy(`${PROXY_ORIGIN}/https://api.example.com/items`, {
+			method: "POST",
+			headers: { "x-proxy-token": TOKEN, "content-type": "application/json" },
+			body: '{"a":1}',
+		});
+		expect(response.status).toBe(201);
+		const out = lastOutbound();
+		expect(out.method).toBe("POST");
+		expect(await out.text()).toBe('{"a":1}');
+	});
+
+	it("returns 502 when the backend fetch fails", async () => {
+		backendHandler = () => {
+			throw new Error("connection refused");
+		};
+		const response = await callProxy(`${PROXY_ORIGIN}/https://example.com/x`, {
+			headers: { "x-proxy-token": TOKEN },
+		});
+		expect(response.status).toBe(502);
+	});
+});
