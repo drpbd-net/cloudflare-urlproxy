@@ -1,6 +1,8 @@
 import { env, SELF, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import worker from "../src/index";
+import { setFtpConnectorForTesting } from "../src/ftp";
+import { installFtpFakes } from "./ftp-helpers";
 
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 
@@ -33,6 +35,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	globalThis.fetch = realFetch;
+	setFtpConnectorForTesting(null);
 });
 
 function lastOutbound(): Request {
@@ -111,11 +114,36 @@ describe("urlproxy worker", () => {
 		expect(response.status).toBe(400);
 	});
 
-	it("returns 400 for non-http schemes such as ftp", async () => {
-		const response = await callProxy(`${PROXY_ORIGIN}/ftp://example.com/file`, {
+	it("still returns 400 for unsupported schemes such as ssh://", async () => {
+		const response = await callProxy(`${PROXY_ORIGIN}/ssh://example.com/x`, {
 			headers: { "x-proxy-token": TOKEN },
 		});
 		expect(response.status).toBe(400);
+	});
+
+	it("routes ftp:// destinations through the FTP client with proxy response headers", async () => {
+		installFtpFakes(
+			[
+				"220 ready\r\n",
+				"331 pass\r\n",
+				"230 ok\r\n",
+				"200 type\r\n",
+				"229 (|||9998|)\r\n",
+				"150 opening\r\n",
+				"226 done\r\n",
+				"221 bye\r\n",
+			],
+			[["sub\r\n", "file.txt\r\n"]],
+		);
+		const response = await callProxy(`${PROXY_ORIGIN}/ftp://files.example.com/pub/`, {
+			headers: { "x-proxy-token": TOKEN },
+		});
+		expect(response.status).toBe(200);
+		const html = await response.text();
+		expect(html).toContain("Index of ftp://files.example.com/pub/");
+		// FTP 响应同样经过代理响应头处理 (CSP / no-store)
+		expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+		expect(response.headers.get("cache-control")).toBe("no-store");
 	});
 
 	it("returns 400 for proxy loop destinations (destination host equals proxy host)", async () => {

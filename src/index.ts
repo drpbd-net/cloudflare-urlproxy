@@ -10,6 +10,8 @@
  *   - 查询参数 ?__proxy_token=<token> (该参数会被剥离, 不转发给目标)
  */
 
+import { fetchFtp, redactUrlCredentials } from "./ftp";
+
 const PROXY_TOKEN_HEADER = "x-proxy-token";
 const PROXY_TOKEN_QUERY = "__proxy_token";
 const ORIGINAL_CONTENT_PREFIX = "/~~/";
@@ -39,14 +41,28 @@ export default {
 			return new Response(parsed.error, { status: parsed.status });
 		}
 		const { dstUrl, dstUrlStr, originalContent } = parsed;
-		console.debug("destination parsed", { func, dstUrlStr, originalContent });
+		// 日志中的目的 URL 一律脱敏凭据
+		const loggableDst = redactUrlCredentials(dstUrl);
+		console.debug("destination parsed", { func, dstUrlStr: loggableDst, originalContent });
+
+		if (dstUrl.protocol === "ftp:") {
+			// fetch() 不支持 FTP, 分派到基于 cloudflare:sockets 的 FTP 客户端
+			console.debug("routing to FTP client", { func, dstUrlStr: loggableDst });
+			const ftpResponse = await fetchFtp(dstUrl, (p) => ctx.waitUntil(p), `${url.protocol}//${url.host}/`);
+			const headers = buildResponseHeaders(request, env, url, ftpResponse);
+			return new Response(ftpResponse.body, {
+				status: ftpResponse.status,
+				statusText: ftpResponse.statusText,
+				headers,
+			});
+		}
 
 		const backendRequest = buildBackendRequest(request, dstUrl, dstUrlStr);
 		// Trace(6) 级别: 记录发往上游的完整请求头 (凭证脱敏, 请求 body 为流式透传, 不落日志)
 		console.trace("outbound backend request", {
 			func,
 			method: backendRequest.method,
-			url: backendRequest.url,
+			url: loggableDst,
 			headers: redactHeaders(backendRequest.headers),
 		});
 
@@ -54,12 +70,12 @@ export default {
 		try {
 			backendResponse = await fetch(backendRequest);
 		} catch (e) {
-			console.error("backend fetch failed", { func, error: String(e), dstUrlStr });
+			console.error("backend fetch failed", { func, error: String(e), dstUrlStr: loggableDst });
 			return new Response("Bad gateway", { status: 502, statusText: "Bad gateway" });
 		}
 		if (backendResponse.status !== 200) {
 			// 只记录状态, 不打印完整响应对象, 避免目标响应头中的凭证进入日志
-			console.warn("backend responded with non-200 status", { func, status: backendResponse.status, dstUrlStr });
+			console.warn("backend responded with non-200 status", { func, status: backendResponse.status, dstUrlStr: loggableDst });
 		}
 
 		const responseHeaders = buildResponseHeaders(request, env, url, backendResponse);
@@ -129,8 +145,8 @@ function parseDestinationUrl(url: URL): ParsedDestination {
 	}
 	const dstUrlStr = path.slice(1) + url.search;
 
-	if (!/^https?:\/\//i.test(dstUrlStr)) {
-		console.warn("destination rejected: must start with http:// or https://", { func });
+	if (!/^(https?|ftp):\/\//i.test(dstUrlStr)) {
+		console.warn("destination rejected: must start with http(s):// or ftp://", { func });
 		return { error: "Invalid Destination URL", status: 400 };
 	}
 	const dstUrl = new URL(dstUrlStr);
@@ -138,7 +154,7 @@ function parseDestinationUrl(url: URL): ParsedDestination {
 		console.warn("destination rejected: proxy loop detected", { func });
 		return { error: "Proxy loop detected", status: 400 };
 	}
-	console.debug("destination accepted", { func, dstUrlStr, originalContent });
+	console.debug("destination accepted", { func, dstUrlStr: redactUrlCredentials(dstUrl), originalContent });
 	return { dstUrl, dstUrlStr, originalContent };
 }
 
@@ -154,7 +170,7 @@ function buildBackendRequest(request: Request, dstUrl: URL, dstUrlStr: string): 
 	headers.set("cache-control", "no-store");
 	const method = request.method.toUpperCase();
 	const bodyAllowed = method !== "GET" && method !== "HEAD";
-	console.debug("backend request built", { func, method: request.method, dstUrlStr });
+	console.debug("backend request built", { func, method: request.method, dstUrlStr: redactUrlCredentials(dstUrl) });
 	return new Request(dstUrlStr, {
 		method: request.method,
 		headers,
