@@ -3,6 +3,10 @@ import { setFtpConnectorForTesting, type FtpConnector, type FtpSocket } from "..
 /**
  * 测试用假 FTP socket: 按脚本回放响应, 记录写入的命令。
  * controlReadable 不主动 close——脚本耗尽后再有读取会挂起, 从而暴露脚本与实际会话不匹配。
+ *
+ * Fake FTP socket for tests: replays responses from a script and records written commands.
+ * controlReadable is never closed — a read after the script runs dry would hang,
+ * exposing a mismatch between the script and the actual session.
  */
 export class FakeFtpSocket implements FtpSocket {
 	sent: string[] = [];
@@ -48,6 +52,10 @@ export interface InstalledFtpFakes {
 /**
  * 安装假的 FTP connector (替换真实 TCP 连接), 返回捕获对象。
  * 每个 dataScripts 元素对应一次数据连接的回放脚本; 测试结束须调用 setFtpConnectorForTesting(null) 恢复。
+ *
+ * Install a fake FTP connector (replacing real TCP connections) and return the capture object.
+ * Each dataScripts element is the replay script for one data connection; tests must call
+ * setFtpConnectorForTesting(null) when done to restore the real connector.
  */
 export function installFtpFakes(
 	controlScript: string[],

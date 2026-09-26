@@ -10,11 +10,14 @@ const TOKEN = "unit-test-token";
 const PROXY_ORIGIN = "https://proxy.example.com";
 
 // wrangler types 会把 vars 值字面量化为 `""`, 测试注入任意运行时字符串时需要断言回 Env
+// wrangler types literalizes vars values as `""`; tests inject arbitrary runtime strings, so cast back to Env
 const TEST_ENV = { ...env, PROXY_TOKEN: TOKEN, ALLOWED_ORIGINS: "" } as unknown as Env;
 
 // ---------------------------------------------------------------------------
 // 出站 fetch mock: unit 风格测试与被测 worker 运行在同一 isolate,
 // 直接替换 globalThis.fetch 即可拦截 worker 发出的子请求。
+// outbound fetch mock: unit-style tests run in the same isolate as the worker under test,
+// so replacing globalThis.fetch intercepts the subrequests the worker makes.
 // ---------------------------------------------------------------------------
 type BackendHandler = (req: Request) => Response;
 let backendHandler: BackendHandler | null = null;
@@ -93,10 +96,10 @@ describe("urlproxy worker", () => {
 		const out = lastOutbound();
 		expect(out.url).toBe("https://api.example.com/v1/data?x=1");
 		expect(out.headers.get("host")).toBe("api.example.com");
-		// 安全修复: 代理域 Cookie 与访问令牌不得转发给目标
+		// 安全修复: 代理域 Cookie 与访问令牌不得转发给目标 / security fix: proxy-domain cookies and the access token must not be forwarded
 		expect(out.headers.get("cookie")).toBeNull();
 		expect(out.headers.get("x-proxy-token")).toBeNull();
-		// Authorization 是客户端显式提供的凭证, 保留转发
+		// Authorization 是客户端显式提供的凭证, 保留转发 / Authorization is provided explicitly by the client, keep forwarding it
 		expect(out.headers.get("authorization")).toBe("Bearer dst-token");
 	});
 
@@ -141,7 +144,7 @@ describe("urlproxy worker", () => {
 		expect(response.status).toBe(200);
 		const html = await response.text();
 		expect(html).toContain("Index of ftp://files.example.com/pub/");
-		// FTP 响应同样经过代理响应头处理 (CSP / no-store)
+		// FTP 响应同样经过代理响应头处理 (CSP / no-store) / FTP responses go through the same proxy header pipeline (CSP / no-store)
 		expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
 		expect(response.headers.get("cache-control")).toBe("no-store");
 	});
@@ -167,11 +170,11 @@ describe("urlproxy worker", () => {
 			headers: { "x-proxy-token": TOKEN },
 		});
 		expect(response.status).toBe(200);
-		// 原样直通, body 不被改写
+		// 原样直通, body 不被改写 / original passthrough, body untouched
 		expect(await response.text()).toBe(body);
-		// 安全修复: 不透传目标的 Set-Cookie, 避免多目标共享代理域 cookie jar
+		// 安全修复: 不透传目标的 Set-Cookie, 避免多目标共享代理域 cookie jar / security fix: no Set-Cookie passthrough, so targets never share the proxy-domain cookie jar
 		expect(response.headers.get("set-cookie")).toBeNull();
-		// CSP 始终替换为受限版本 (frame-ancestors 是本代理 CSP 模板的特有指令)
+		// CSP 始终替换为受限版本 (frame-ancestors 是本代理 CSP 模板的特有指令) / the restrictive CSP is always applied (frame-ancestors is unique to this proxy's CSP template)
 		expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
 		expect(response.headers.get("cache-control")).toBe("no-store");
 	});
@@ -195,7 +198,7 @@ describe("urlproxy worker", () => {
 				'href="https://proxy.example.com/https://example.com/x" ' +
 				'alt="https://proxy.example.com/https://proto.example.com/y"',
 		);
-		// 过期的 content-encoding / content-length 不得残留在重写后的响应里
+		// 过期的 content-encoding / content-length 不得残留在重写后的响应里 / stale content-encoding / content-length must not survive into the rewritten response
 		expect(response.headers.get("content-encoding")).toBeNull();
 		expect(response.headers.get("content-length")).toBeNull();
 	});

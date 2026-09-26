@@ -31,7 +31,7 @@ describe("ftp protocol parsing", () => {
 	it("parses EPSV and PASV data ports", () => {
 		expect(parseEpsvPort("229 Entering Extended Passive Mode (|||2121|)")).toBe(2121);
 		expect(parseEpsvPort("229 no parens here")).toBeNull();
-		// PASV: 忽略服务器返回的 IP (NAT 场景常是内网地址), 只取端口
+		// PASV: 忽略服务器返回的 IP (NAT 场景常是内网地址), 只取端口 / PASV: ignore the server-returned IP (often internal under NAT), take the port only
 		expect(parsePasvPort("227 Entering Passive Mode (192,168,1,10,39,15)")).toBe(39 * 256 + 15);
 		expect(parsePasvPort("227 bad format")).toBeNull();
 	});
@@ -70,9 +70,9 @@ describe("ftp helpers", () => {
 		expect(html).not.toContain("<script>alert(1)</script>");
 		expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
 		expect(html).toContain("a&amp;b");
-		// 链接经代理, 文件名已编码
+		// 链接经代理, 文件名已编码 / links go through the proxy, names are URL-encoded
 		expect(html).toContain(`${PROXY_BASE}ftp://h.example/pub/${encodeURIComponent("<script>alert(1)</script>")}`);
-		// 非根目录提供父目录链接
+		// 非根目录提供父目录链接 / non-root directories get a parent link
 		expect(html).toContain(`href="${PROXY_BASE}ftp://h.example/"`);
 	});
 
@@ -104,7 +104,7 @@ describe("fetchFtp sessions", () => {
 		expect(new TextDecoder().decode(await response.arrayBuffer())).toBe("file-bytes");
 		expect(fakes.calls.control).toEqual({ hostname: "files.example.com", port: 21 });
 		expect(fakes.calls.data).toEqual([{ hostname: "files.example.com", port: 9999 }]);
-		// waitUntil 注入的后台收尾: 等 226, 发 QUIT, 关闭控制连接
+		// waitUntil 注入的后台收尾: 等 226, 发 QUIT, 关闭控制连接 / background finalization via waitUntil: await 226, send QUIT, close the control connection
 		await Promise.all(pending);
 		expect(fakes.control.sent.map(stripCrlf)).toEqual([
 			"USER anonymous",

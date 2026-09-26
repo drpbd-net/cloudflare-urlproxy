@@ -7,11 +7,21 @@
  *   - 被动模式: 优先 EPSV, 失败回退 PASV (PASV 返回的 IP 一律忽略, 始终用控制连接的主机, 规避 NAT 场景)
  *   - 文件: RETR 二进制流式直通; 目录: NLST 生成 HTML 导航页
  *   - 凭据: 从 ftp://user:pass@host/ 内嵌获取, 默认匿名 (anonymous); 凭据一律不落日志
+ *
+ * Minimal FTP client: passive-mode transfers over cloudflare:sockets TCP connections,
+ * dispatched from src/index.ts for ftp:// destinations.
+ *
+ * Capabilities (deliberate trade-offs):
+ *   - plaintext FTP only, no FTPS (AUTH TLS is a future enhancement)
+ *   - passive mode: EPSV first, PASV fallback (the IP returned by PASV is always ignored; always
+ *     reconnect to the control-connection host, which sidesteps NAT setups)
+ *   - files: streamed binary via RETR; directories: NLST rendered into an HTML navigation page
+ *   - credentials: taken from ftp://user:pass@host/ when embedded, anonymous by default; never logged
  */
 
 import { connect } from "cloudflare:sockets";
 
-/** 与 cloudflare:sockets 的 Socket 结构兼容的最小接口, 便于测试注入 */
+/** 与 cloudflare:sockets 的 Socket 结构兼容的最小接口, 便于测试注入 / Minimal interface structurally compatible with cloudflare:sockets' Socket, easy to fake in tests */
 export interface FtpSocket {
 	opened: Promise<unknown>;
 	readable: ReadableStream<Uint8Array>;
@@ -19,26 +29,26 @@ export interface FtpSocket {
 	close(): Promise<void> | void;
 }
 
-/** 连接器: 控制连接与数据连接的建立入口 */
+/** 连接器: 控制连接与数据连接的建立入口 / Connector: entry point for control and data connections */
 export interface FtpConnector {
 	connectControl(hostname: string, port: number): FtpSocket;
 	connectData(hostname: string, port: number): FtpSocket;
 }
 
 const realConnector: FtpConnector = {
-	// 仅明文 FTP; FTPS (AUTH TLS + startTls) 为后续增强
+	// 仅明文 FTP; FTPS (AUTH TLS + startTls) 为后续增强 / plaintext FTP only; FTPS (AUTH TLS + startTls) is a future enhancement
 	connectControl: (hostname, port) => connect({ hostname, port }),
 	connectData: (hostname, port) => connect({ hostname, port }),
 };
 
 let activeConnector: FtpConnector = realConnector;
 
-/** 测试注入口: 传入假 connector 替换真实 TCP 连接, 传 null 恢复 */
+/** 测试注入口: 传入假 connector 替换真实 TCP 连接, 传 null 恢复 / Test hook: pass a fake connector to replace real TCP; pass null to restore */
 export function setFtpConnectorForTesting(connector: FtpConnector | null): void {
 	activeConnector = connector ?? realConnector;
 }
 
-/** FTP 会话错误; httpStatus 为映射给客户端的响应状态码 */
+/** FTP 会话错误; httpStatus 为映射给客户端的响应状态码 / FTP session error; httpStatus is the status code mapped for the client */
 class FtpError extends Error {
 	constructor(
 		readonly httpStatus: number,
@@ -65,31 +75,31 @@ interface FtpSession {
 }
 
 // ---------------------------------------------------------------------------
-// 纯函数: 协议解析与 URL 处理
+// 纯函数: 协议解析与 URL 处理 / Pure functions: protocol parsing and URL handling
 // ---------------------------------------------------------------------------
 
-/** 解析 FTP 响应行: "230 text" 为末行, "230-text" 为续行, 非法返回 null */
+/** 解析 FTP 响应行: "230 text" 为末行, "230-text" 为续行, 非法返回 null / Parse an FTP response line: "230 text" is final, "230-text" continues, null when invalid */
 export function parseFtpResponseLine(line: string): { code: number; isFinal: boolean } | null {
 	const m = /^(\d{3})([- ]?)/.exec(line);
 	if (!m) return null;
 	return { code: Number(m[1]), isFinal: m[2] !== "-" };
 }
 
-/** 从 EPSV 响应中解析数据端口: "229 ... (|||2121|)" -> 2121 */
+/** 从 EPSV 响应中解析数据端口: "229 ... (|||2121|)" -> 2121 / Parse the data port from an EPSV response: "229 ... (|||2121|)" -> 2121 */
 export function parseEpsvPort(text: string): number | null {
 	const m = /\(\|\|\|(\d+)\|\)/.exec(text);
 	if (!m) return null;
 	return Number(m[1]);
 }
 
-/** 从 PASV 响应中解析数据端口: "227 ... (h,h,h,h,p1,p2)" -> p1*256+p2; 忽略返回的 IP */
+/** 从 PASV 响应中解析数据端口: "227 ... (h,h,h,h,p1,p2)" -> p1*256+p2; 忽略返回的 IP / Parse the data port from a PASV response: "227 ... (h,h,h,h,p1,p2)" -> p1*256+p2; the returned IP is ignored */
 export function parsePasvPort(text: string): number | null {
 	const m = /\((\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\)/.exec(text);
 	if (!m) return null;
 	return Number(m[5]) * 256 + Number(m[6]);
 }
 
-/** 取 FTP 登录凭据: URL 内嵌 (百分号解码), 缺省为匿名 */
+/** 取 FTP 登录凭据: URL 内嵌 (百分号解码), 缺省为匿名 / Get FTP credentials: URL-embedded (percent-decoded), anonymous by default */
 export function ftpCredentials(dstUrl: URL): { user: string; password: string } {
 	if (dstUrl.username) {
 		return {
@@ -100,12 +110,12 @@ export function ftpCredentials(dstUrl: URL): { user: string; password: string } 
 	return { user: "anonymous", password: "anonymous@" };
 }
 
-/** 剥离 CR/LF, 防止 URL 中的换行注入额外 FTP 命令 */
+/** 剥离 CR/LF, 防止 URL 中的换行注入额外 FTP 命令 / Strip CR/LF so newlines in URLs cannot inject extra FTP commands */
 export function sanitizeFtpArg(arg: string): string {
 	return arg.replace(/[\r\n]/g, "");
 }
 
-/** 日志用: 隐藏 URL 中的密码 */
+/** 日志用: 隐藏 URL 中的密码 / For logs: hide the password inside a URL */
 export function redactUrlCredentials(url: URL): string {
 	if (!url.username && !url.password) return url.href;
 	return `${url.protocol}//${url.username}${url.password ? ":***" : ""}@${url.host}${url.pathname}${url.search}${url.hash}`;
@@ -140,7 +150,7 @@ const CONTENT_TYPES: Record<string, string> = {
 	webm: "video/webm",
 };
 
-/** 按扩展名猜测 content-type, 未识别返回 application/octet-stream */
+/** 按扩展名猜测 content-type, 未识别返回 application/octet-stream / Guess content-type by extension; application/octet-stream when unknown */
 export function guessContentType(path: string): string {
 	const m = /\.([a-z0-9]+)$/i.exec(path);
 	if (!m) return "application/octet-stream";
@@ -175,11 +185,12 @@ function parentOf(path: string): string {
 	return idx <= 0 ? "/" : `${trimmed.slice(0, idx)}/`;
 }
 
-/** 生成目录导航页: 名字做 HTML 转义, 链接经代理并保留 URL 中已有的编码凭据 */
+/** 生成目录导航页: 名字做 HTML 转义, 链接经代理并保留 URL 中已有的编码凭据 / Render the directory navigation page: names are HTML-escaped, links go through the proxy and keep the URL's encoded credentials */
 export function renderDirectoryListing(dstUrl: URL, proxyBase: string, names: string[]): string {
 	const func = "src.ftp.renderDirectoryListing";
 	console.debug("rendering directory listing", { func, count: names.length });
 	// 链接保留编码凭据以便带凭据继续浏览 (用户自己 URL 中提供的值, 转义防注入)
+	// links keep the encoded credentials so credentialed browsing continues (values the user put in their own URL; escaped against injection)
 	const credentials = dstUrl.username ? `${dstUrl.username}:${dstUrl.password}@` : "";
 	const listingUrl = `ftp://${dstUrl.host}${dstUrl.pathname}`;
 	const links: string[] = [];
@@ -205,10 +216,10 @@ ${links.join("\n")}
 }
 
 // ---------------------------------------------------------------------------
-// 会话实现
+// 会话实现 / Session implementation
 // ---------------------------------------------------------------------------
 
-/** 流式按行读取: 处理 chunk 半行/多行边界与多字节 UTF-8 边界 */
+/** 流式按行读取: 处理 chunk 半行/多行边界与多字节 UTF-8 边界 / Streaming line reader: handles chunk boundaries (partial/multiple lines) and multi-byte UTF-8 boundaries */
 class FtpLineReader {
 	private buffer = "";
 	private done = false;
@@ -238,7 +249,7 @@ class FtpLineReader {
 	}
 }
 
-/** 读取完整 FTP 响应 (聚合 "xxx-" 续行直到 "xxx " 末行) */
+/** 读取完整 FTP 响应 (聚合 "xxx-" 续行直到 "xxx " 末行) / Read a complete FTP response (aggregate "xxx-" continuation lines up to the "xxx " final line) */
 async function readFtpResponse(lineReader: FtpLineReader): Promise<FtpResponse> {
 	const first = await lineReader.readLine();
 	const parsed = parseFtpResponseLine(first);
@@ -247,7 +258,7 @@ async function readFtpResponse(lineReader: FtpLineReader): Promise<FtpResponse> 
 	}
 	if (parsed.isFinal) return { code: parsed.code, text: first };
 	const lines = [first];
-	// 行数上限防御: 异常服务器不应导致无限读取
+	// 行数上限防御: 异常服务器不应导致无限读取 / line-count guard: a misbehaving server must not cause unbounded reads
 	for (let i = 0; i < 32; i++) {
 		const line = await lineReader.readLine();
 		if (line === "") throw new FtpError(502, "FTP connection closed mid-response");
@@ -263,7 +274,7 @@ function ftpCommand(session: FtpSession, cmd: string): Promise<FtpResponse> {
 	return session.writer.write(encoder.encode(`${cmd}\r\n`)).then(() => readFtpResponse(session.lineReader));
 }
 
-/** 建立控制连接并完成登录与二进制模式设置 */
+/** 建立控制连接并完成登录与二进制模式设置 / Open the control connection, log in, and switch to binary mode */
 async function openControlSession(hostname: string, port: number, creds: { user: string; password: string }): Promise<FtpSession> {
 	const func = "src.ftp.openControlSession";
 	console.debug("opening FTP control connection", { func, hostname, port });
@@ -287,7 +298,7 @@ async function openControlSession(hostname: string, port: number, creds: { user:
 			try {
 				writer.releaseLock();
 			} catch {
-				// 锁已释放, 忽略
+				// 锁已释放, 忽略 / lock already released, ignore
 			}
 			socket.close();
 		},
@@ -312,7 +323,7 @@ async function openControlSession(hostname: string, port: number, creds: { user:
 	return session;
 }
 
-/** 协商被动数据端口并建立数据连接 (EPSV 优先, PASV 回退) */
+/** 协商被动数据端口并建立数据连接 (EPSV 优先, PASV 回退) / Negotiate the passive data port and open the data connection (EPSV first, PASV fallback) */
 async function openPassiveData(session: FtpSession): Promise<FtpSocket> {
 	const func = "src.ftp.openPassiveData";
 	let resp = await session.command("EPSV");
@@ -334,14 +345,14 @@ async function openPassiveData(session: FtpSession): Promise<FtpSocket> {
 	return dataSocket;
 }
 
-/** RETR 成功后的后台收尾 (waitUntil 中执行): 等 226, QUIT, 关闭控制连接 */
+/** RETR 成功后的后台收尾 (waitUntil 中执行): 等 226, QUIT, 关闭控制连接 / Background finalization after a successful RETR (runs in waitUntil): await 226, QUIT, close the control connection */
 async function finalizeTransfer(session: FtpSession): Promise<void> {
 	const func = "src.ftp.finalizeTransfer";
 	try {
 		const done = await readFtpResponse(session.lineReader);
 		console.debug("transfer finalized", { func, code: done.code });
 	} catch (e) {
-		// 客户端中断等场景下可能读不到 226, 容忍并继续收尾
+		// 客户端中断等场景下可能读不到 226, 容忍并继续收尾 / the 226 may never arrive when the client aborts; tolerate and finalize anyway
 		console.debug("no final transfer response", { func, error: String(e) });
 	}
 	try {
@@ -353,7 +364,7 @@ async function finalizeTransfer(session: FtpSession): Promise<void> {
 	session.close();
 }
 
-/** 获取目录列表并生成 HTML 导航页 (同步收尾, 不依赖 waitUntil) */
+/** 获取目录列表并生成 HTML 导航页 (同步收尾, 不依赖 waitUntil) / Fetch the directory listing and render the HTML navigation page (finalizes synchronously, no waitUntil needed) */
 async function listDirectory(session: FtpSession, dstUrl: URL, proxyBase: string): Promise<Response> {
 	const func = "src.ftp.listDirectory";
 	const path = dstUrl.pathname || "/";
@@ -369,7 +380,7 @@ async function listDirectory(session: FtpSession, dstUrl: URL, proxyBase: string
 	try {
 		await session.command("QUIT");
 	} catch {
-		// 服务器可能直接断开, 忽略
+		// 服务器可能直接断开, 忽略 / the server may drop the connection directly, ignore
 	}
 	session.close();
 	const names = listing.split(/\r?\n/).filter((n) => n !== "");
@@ -381,7 +392,7 @@ async function listDirectory(session: FtpSession, dstUrl: URL, proxyBase: string
 	});
 }
 
-/** 取文件: RETR 流式直通; 550 时回退为目录列表 (无尾斜杠的目录访问) */
+/** 取文件: RETR 流式直通; 550 时回退为目录列表 (无尾斜杠的目录访问) / Fetch a file: stream via RETR; fall back to a directory listing on 550 (directory accessed without a trailing slash) */
 async function retrieveFile(
 	session: FtpSession,
 	dstUrl: URL,
@@ -402,6 +413,7 @@ async function retrieveFile(
 		throw new FtpError(502, `FTP RETR failed (code ${resp.code})`, resp.code);
 	}
 	// 数据流作为响应 body 流式直传; 控制连接交给 waitUntil 收尾
+	// the data stream becomes the response body; the control connection is finalized via waitUntil
 	waitUntil(finalizeTransfer(session));
 	console.debug("file transfer started", { func, path });
 	return new Response(dataSocket.readable, {
@@ -427,7 +439,10 @@ function toFtpErrorResponse(e: unknown): Response {
 
 /**
  * FTP 入口: 按 URL 取文件或目录列表, 返回可直接交给客户端的 Response。
- * waitUntil 用于承接 RETT 流式响应后的控制连接收尾; proxyBase 用于目录页链接生成。
+ * waitUntil 用于承接 RETR 流式响应后的控制连接收尾; proxyBase 用于目录页链接生成。
+ *
+ * FTP entry point: fetches a file or directory listing by URL and returns a client-ready Response.
+ * waitUntil carries the control-connection finalization for streamed RETR responses; proxyBase is used for directory-page links.
  */
 export async function fetchFtp(
 	dstUrl: URL,
@@ -445,17 +460,17 @@ export async function fetchFtp(
 		const path = dstUrl.pathname || "/";
 		if (path.endsWith("/")) {
 			const response = await listDirectory(session, dstUrl, proxyBase);
-			session = null; // 所有权已移交给 listDirectory (其内部已收尾)
+			session = null; // 所有权已移交给 listDirectory (其内部已收尾) / ownership transferred to listDirectory (it finalizes internally)
 			return response;
 		}
 		const response = await retrieveFile(session, dstUrl, proxyBase, waitUntil);
-		session = null; // 控制连接由 waitUntil 的 finalizeTransfer 负责
+		session = null; // 控制连接由 waitUntil 的 finalizeTransfer 负责 / the control connection is finalizeTransfer's responsibility in waitUntil
 		return response;
 	} catch (e) {
 		console.warn("FTP request failed", { func, url: logUrl, error: e instanceof FtpError ? `${e.httpStatus} ${e.message}` : String(e) });
 		return toFtpErrorResponse(e);
 	} finally {
-		// 仅在所有权未移交 (出错/中断) 时兜底关闭
+		// 仅在所有权未移交 (出错/中断) 时兜底关闭 / close as a last resort only when ownership was not transferred (error/abort)
 		if (session) session.close();
 	}
 }

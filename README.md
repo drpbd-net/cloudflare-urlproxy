@@ -1,111 +1,122 @@
 # cloudflare-urlproxy
 
-部署在 Cloudflare Workers 上的 URL 反向代理。访问 `https://<worker-host>/https://<目标地址>` 即可经由代理访问目标站点；文本响应中的链接会被自动改写，使页面内的后续请求继续经由代理。
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/iceking2nd/cloudflare-urlproxy)
 
-## 用法
+English | [简体中文](./README_zh.md)
 
-### 普通模式（文本响应自动改写）
+A URL reverse proxy running on Cloudflare Workers. Visit `https://<worker-host>/https://<destination>` and the request is proxied to the destination; links inside text responses are rewritten automatically so subsequent requests keep going through the proxy.
+
+## Usage
+
+### Normal mode (text responses are rewritten)
 
 ```
 https://<worker-host>/https://example.com/page
 ```
 
-响应中的绝对地址、绝对路径（`"/path"`）与协议相对地址（`"//host/path"`）都会被改写为指向代理。
+Absolute URLs, absolute paths (`"/path"`), and protocol-relative URLs (`"//host/path"`) in the response are all rewritten to point at the proxy.
 
-### 原样直通模式
+### Original passthrough mode
 
 ```
 https://<worker-host>/~~/https://example.com/page
 ```
 
-不改动响应 body，其余行为（响应头处理、认证）不变。
+The response body is passed through untouched; everything else (response header handling, authentication) behaves the same.
 
-### FTP 目标
+### FTP destinations
 
-`fetch()` 不支持 FTP 协议，代理基于 `cloudflare:sockets` 内置了最小 FTP 客户端（被动模式，EPSV 优先 / PASV 回退）：
+`fetch()` does not support FTP, so the proxy ships a minimal FTP client built on `cloudflare:sockets` (passive mode, EPSV first / PASV fallback):
 
 ```
-https://<worker-host>/ftp://ftp.example.com/pub/file.txt    文件: 二进制流式直通, 按扩展名设 content-type
-https://<worker-host>/ftp://ftp.example.com/pub/             目录: HTML 导航页, 链接继续经代理
+https://<worker-host>/ftp://ftp.example.com/pub/file.txt    file: streamed binary, content-type by extension
+https://<worker-host>/ftp://ftp.example.com/pub/            directory: HTML navigation page, links stay proxied
 ```
 
-支持 URL 内嵌凭据（`ftp://user:pass@host/`，密码会百分号解码后用于登录），无凭据时按匿名（anonymous）登录；目录页链接会保留已有凭据以便继续浏览。无尾斜杠的目录路径会先尝试文件（RETR），目标不存在时回退为目录列表。不支持 FTP 之外的协议（如 `ssh://`）仍返回 400。
+URL-embedded credentials are supported (`ftp://user:pass@host/`; the password is percent-decoded before login); without credentials it logs in as anonymous. Directory page links keep the existing credentials so browsing continues seamlessly. A directory path without a trailing slash is first tried as a file (RETR) and falls back to a directory listing when it does not exist. Protocols other than HTTP(S)/FTP (e.g. `ssh://`) still return 400.
 
-### 认证
+### Authentication
 
-所有代理请求都需要访问令牌，两种方式任选：
+Every proxied request needs an access token, via either:
 
 ```sh
-# 请求头（适合程序调用）
+# request header (for programmatic use)
 curl -H "X-Proxy-Token: <token>" "https://<worker-host>/https://example.com/page"
 
-# 查询参数（适合直接在浏览器地址栏使用，会被从转发给目标的 URL 中剥离）
+# query parameter (handy for the browser address bar; stripped before forwarding to the destination)
 https://<worker-host>/https://example.com/page?__proxy_token=<token>
 ```
 
-## 配置
+## Configuration
 
-| 环境变量 | 必填 | 说明 |
+| Variable | Required | Notes |
 | --- | --- | --- |
-| `PROXY_TOKEN` | 是 | 访问令牌。生产环境用 secret 注入，未配置时 fail-closed，拒绝所有代理请求（503） |
-| `ALLOWED_ORIGINS` | 否 | 额外允许跨域读取代理响应的来源，逗号分隔，如 `https://app.example.com` |
+| `PROXY_TOKEN` | Yes | Access token. **Set as a secret only** (`npx wrangler secret put PROXY_TOKEN`); never put it in vars (a same-name var overwrites the remote secret on every deploy). Until it is set the proxy is fail-closed and rejects everything (503) |
+| `ALLOWED_ORIGINS` | No | Extra origins allowed to read proxied responses cross-origin, comma-separated, e.g. `https://app.example.com` |
 
-### 本地开发
+### Local development
 
-在项目根目录创建 `.dev.vars`（已被 `.gitignore` 覆盖，勿提交）：
+Create `.dev.vars` in the project root (already gitignored, do not commit it):
 
 ```
 PROXY_TOKEN=dev-token
 ```
 
-然后：
+Then:
 
 ```sh
 npm install
 npm run dev
 ```
 
-## 部署
+## Deploying
 
-`wrangler.jsonc` 已按生产部署示例配置：**workers.dev 默认域名与预览 URL 均已关闭**（`workers_dev: false` + `preview_urls: false`），仅通过自定义域名暴露。
+`wrangler.jsonc` always stays an **example** in the repository (observability off, placeholder custom domains). Production deployments use a throwaway config and never modify the repo copy.
 
-```sh
-# 1. 将 wrangler.jsonc 中 routes 的占位域名 proxy.example.com 替换为你自己的域名
-#    (域名所在 zone 需托管在同一 Cloudflare 账号; custom_domain 模式会自动创建 DNS 记录并签发证书)
-# 2. 配置生产令牌（漏配会拒绝所有请求）
-npx wrangler secret put PROXY_TOKEN
-# 3. 部署
-npm run deploy
-```
+### Option 1: one-click from the Cloudflare dashboard
 
-## 安全设计
+Click the **Deploy to Cloudflare** button at the top of this README and follow the wizard to connect the repository to your Cloudflare account and deploy. Afterwards set the `PROXY_TOKEN` secret in the dashboard under Settings → Variables (until then every request is rejected).
 
-- **fail-closed 认证**：`PROXY_TOKEN` 未配置时拒绝一切代理请求；令牌使用常量时间比较
-- **凭证隔离**：代理域 `Cookie` 与访问令牌不转发给目标；目标的 `Set-Cookie` 不透传（各被代理目标不共享代理域 cookie jar）；`Authorization` 属客户端显式凭证，保留转发
-- **CSP**：始终应用受限 CSP，被代理页面只能从代理自身加载资源、只能向代理发送请求
-- **CORS**：仅允许代理自身来源或 `ALLOWED_ORIGINS` 白名单，不反射请求方可控的头
-- **输入校验**：目的地址必须是 `http(s)://` 绝对地址；拒绝指向代理自身的回环请求（400）
-- **日志脱敏**：非 200 状态只记录状态与 URL；trace 级日志中的凭证类头一律 `[REDACTED]`
-
-## 已知局限
-
-- URL 改写基于正则，会波及文本中所有 `http(s)://` 与引号内绝对路径，包括 JSON/JS 字符串值（如 API 返回的 `url` 字段），下游消费方可能解析失败；需要原始内容时使用 `/~~/` 模式
-- 因剥离 `Set-Cookie`，依赖 cookie 会话的目标站点无法保持登录态（安全与功能的取舍）
-- CSP 的 `script-src` 含 `'unsafe-inline'`，以兼容依赖内联脚本的站点
-- FTP 支持仅为**明文 FTP**（无 FTPS），登录密码以明文穿越代理与服务器，仅建议用于匿名或非敏感资源；日志中的 FTP URL 凭据一律脱敏，但目录页链接会（经转义）保留 URL 中已有的凭据——请勿分享此类链接
-- FTP 被动模式忽略 PASV 响应返回的 IP（始终回连控制连接的主机，规避 NAT 场景）；每个 FTP 请求占用 2 个并发 TCP 连接（控制 + 数据），受 Workers 同时打开连接上限约束；Workers 无法连接 Cloudflare 自身 IP 段
-
-## 开发
+### Option 2: manual deploy with a throwaway config
 
 ```sh
-npm run dev     # 本地开发服务器
-npm test        # vitest 测试（34 个用例：HTTP 代理行为 + FTP 协议会话，FakeSocket 回放，离线可重复）
-npx tsc --noEmit -p tsconfig.json       # 主代码类型检查
-npx tsc --noEmit -p test/tsconfig.json  # 测试代码类型检查
+cp wrangler.jsonc wrangler.prod.jsonc       # wrangler.prod.jsonc is gitignored
+# edit wrangler.prod.jsonc: name, routes (your custom domains), enable observability as needed
+npx wrangler deploy --config wrangler.prod.jsonc
+npx wrangler secret put PROXY_TOKEN --config wrangler.prod.jsonc   # fail-closed: all requests rejected until set
+rm wrangler.prod.jsonc
 ```
 
-变更 `wrangler.jsonc` 中的绑定后运行 `npm run cf-typegen` 重新生成类型。
+The example config ships with production best practices pre-set: **the workers.dev route and preview URLs are both disabled** (`workers_dev: false` + `preview_urls: false`), exposing the proxy through custom domains only.
 
-## 许可证
+## Security design
+
+- **Fail-closed authentication**: every proxy request is rejected until `PROXY_TOKEN` is set; tokens are compared in constant time
+- **Credential isolation**: proxy-domain `Cookie` and the access token are never forwarded; the destination's `Set-Cookie` is dropped (proxied targets never share the proxy-domain cookie jar); `Authorization` is an explicit client credential and is forwarded
+- **CSP**: a restrictive CSP is always applied — proxied pages can only load resources from, and send requests to, the proxy itself
+- **CORS**: only the proxy's own origin or the `ALLOWED_ORIGINS` allowlist; client-controlled headers are never reflected
+- **Input validation**: destinations must be absolute `http(s)://` or `ftp://` URLs; loops pointing back at the proxy are rejected (400); FTP command arguments are stripped of CR/LF against injection
+- **Log redaction**: non-200 statuses log the status and URL only; URL credentials become `user:***@`; credential-like headers in trace logs are `[REDACTED]`
+
+## Known limitations
+
+- URL rewriting is regex-based and rewrites every `http(s)://` and quoted absolute path in text — including JSON/JS string values (e.g. `url` fields in API payloads) — which can break downstream parsers; use `/~~/` mode when you need the original content
+- Because `Set-Cookie` is stripped, destinations relying on cookie sessions cannot stay logged in (a deliberate security trade-off)
+- The CSP's `script-src` includes `'unsafe-inline'` to keep inline-script sites working
+- FTP support is **plaintext FTP only** (no FTPS); login passwords cross the wire in the clear, so stick to anonymous or non-sensitive resources; FTP credentials are redacted in logs, but directory page links do keep (escaped) credentials already present in the URL — do not share such links
+- FTP passive mode ignores the IP returned by PASV (always reconnects to the control-connection host, sidestepping NAT); each FTP request holds 2 concurrent TCP connections (control + data), bounded by the Workers simultaneous-open-connection limit; Workers cannot connect to Cloudflare's own IP ranges
+
+## Development
+
+```sh
+npm run dev     # local dev server
+npm test        # vitest (34 cases: HTTP proxy behavior + FTP protocol sessions, replayed via FakeSocket, fully offline)
+npx tsc --noEmit -p tsconfig.json       # typecheck main code
+npx tsc --noEmit -p test/tsconfig.json  # typecheck tests
+```
+
+Run `npm run cf-typegen` to regenerate types after changing bindings in `wrangler.jsonc`.
+
+## License
 
 [MIT](./LICENSE)
