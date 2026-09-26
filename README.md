@@ -20,6 +20,17 @@ https://<worker-host>/~~/https://example.com/page
 
 不改动响应 body，其余行为（响应头处理、认证）不变。
 
+### FTP 目标
+
+`fetch()` 不支持 FTP 协议，代理基于 `cloudflare:sockets` 内置了最小 FTP 客户端（被动模式，EPSV 优先 / PASV 回退）：
+
+```
+https://<worker-host>/ftp://ftp.example.com/pub/file.txt    文件: 二进制流式直通, 按扩展名设 content-type
+https://<worker-host>/ftp://ftp.example.com/pub/             目录: HTML 导航页, 链接继续经代理
+```
+
+支持 URL 内嵌凭据（`ftp://user:pass@host/`，密码会百分号解码后用于登录），无凭据时按匿名（anonymous）登录；目录页链接会保留已有凭据以便继续浏览。无尾斜杠的目录路径会先尝试文件（RETR），目标不存在时回退为目录列表。不支持 FTP 之外的协议（如 `ssh://`）仍返回 400。
+
 ### 认证
 
 所有代理请求都需要访问令牌，两种方式任选：
@@ -56,8 +67,14 @@ npm run dev
 
 ## 部署
 
+`wrangler.jsonc` 已按生产部署示例配置：**workers.dev 默认域名与预览 URL 均已关闭**（`workers_dev: false` + `preview_urls: false`），仅通过自定义域名暴露。
+
 ```sh
-npx wrangler secret put PROXY_TOKEN   # 先配置生产令牌，漏配会拒绝所有请求
+# 1. 将 wrangler.jsonc 中 routes 的占位域名 proxy.example.com 替换为你自己的域名
+#    (域名所在 zone 需托管在同一 Cloudflare 账号; custom_domain 模式会自动创建 DNS 记录并签发证书)
+# 2. 配置生产令牌（漏配会拒绝所有请求）
+npx wrangler secret put PROXY_TOKEN
+# 3. 部署
 npm run deploy
 ```
 
@@ -75,12 +92,14 @@ npm run deploy
 - URL 改写基于正则，会波及文本中所有 `http(s)://` 与引号内绝对路径，包括 JSON/JS 字符串值（如 API 返回的 `url` 字段），下游消费方可能解析失败；需要原始内容时使用 `/~~/` 模式
 - 因剥离 `Set-Cookie`，依赖 cookie 会话的目标站点无法保持登录态（安全与功能的取舍）
 - CSP 的 `script-src` 含 `'unsafe-inline'`，以兼容依赖内联脚本的站点
+- FTP 支持仅为**明文 FTP**（无 FTPS），登录密码以明文穿越代理与服务器，仅建议用于匿名或非敏感资源；日志中的 FTP URL 凭据一律脱敏，但目录页链接会（经转义）保留 URL 中已有的凭据——请勿分享此类链接
+- FTP 被动模式忽略 PASV 响应返回的 IP（始终回连控制连接的主机，规避 NAT 场景）；每个 FTP 请求占用 2 个并发 TCP 连接（控制 + 数据），受 Workers 同时打开连接上限约束；Workers 无法连接 Cloudflare 自身 IP 段
 
 ## 开发
 
 ```sh
 npm run dev     # 本地开发服务器
-npm test        # vitest 测试（17 个用例，含出站请求 mock）
+npm test        # vitest 测试（34 个用例：HTTP 代理行为 + FTP 协议会话，FakeSocket 回放，离线可重复）
 npx tsc --noEmit -p tsconfig.json       # 主代码类型检查
 npx tsc --noEmit -p test/tsconfig.json  # 测试代码类型检查
 ```

@@ -1,6 +1,13 @@
 /**
- * For more details on how to configure Wrangler, refer to:
- * https://developers.cloudflare.com/workers/wrangler/configuration/
+ * 生产部署示例配置
+ *
+ * 部署前置条件:
+ *   1. 将下方 routes 中的占位域名替换为你自己的域名; custom_domain 模式会自动创建
+ *      DNS 记录并签发证书, 要求该域名所在 zone 托管在同一 Cloudflare 账号下
+ *   2. 设置访问令牌: npx wrangler secret put PROXY_TOKEN
+ *      (vars 留空 + secret 未配置时 fail-closed, 拒绝所有代理请求)
+ *
+ * 更多配置项: https://developers.cloudflare.com/workers/wrangler/configuration/
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
@@ -11,37 +18,26 @@
 		"enabled": true
 	},
 	"upload_source_maps": true,
+
+	// 生产部署只通过自定义域名暴露: 关闭 workers.dev 默认域名与预览 URL
+	// (wrangler >= 4.44.0 时 preview_urls 默认跟随 workers_dev, 此处显式关闭以确保任意版本行为一致)
+	// https://developers.cloudflare.com/workers/configuration/routing/workers-dev/
+	// https://developers.cloudflare.com/workers/versions-and-deployments/preview-urls/
+	"workers_dev": false,
+	"preview_urls": false,
+
+	// 自定义域名 (替换 pattern 为你的域名)
+	// https://developers.cloudflare.com/workers/configuration/routing/custom-domains/
+	"routes": [{ "pattern": "proxy.example.com", "custom_domain": true }],
+
 	/**
-	 * Smart Placement
-	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
-	 */
-	// "placement": {  "mode": "smart" }
-	/**
-	 * Bindings
-	 * Bindings allow your Worker to interact with resources on the Cloudflare Developer Platform, including
-	 * databases, object storage, AI inference, real-time communication and more.
-	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/
-	 */
-	/**
-	 * Environment Variables
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
-	 * Note: Use secrets to store sensitive data.
+	 * 环境变量 (vars 明文, 机密一律用 secret)
 	 * https://developers.cloudflare.com/workers/configuration/secrets/
 	 */
 	"vars": {
-		// 生产环境用 `npx wrangler secret put PROXY_TOKEN` 覆盖；留空时 fail-closed，拒绝所有代理请求
+		// 生产环境用 `npx wrangler secret put PROXY_TOKEN` 覆盖; 留空时 fail-closed, 拒绝所有代理请求
 		"PROXY_TOKEN": "",
-		// 可选：额外允许读取代理响应的跨域来源，逗号分隔，如 "https://app.example.com"
+		// 可选: 额外允许读取代理响应的跨域来源, 逗号分隔, 如 "https://app.example.com"
 		"ALLOWED_ORIGINS": ""
-	},
-	/**
-	 * Static Assets
-	 * https://developers.cloudflare.com/workers/static-assets/binding/
-	 */
-	// "assets": {  "directory": "./public/",  "binding": "ASSETS" }
-	/**
-	 * Service Bindings (communicate between multiple Workers)
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
-	 */
-	// "services": [  {   "binding": "MY_SERVICE",   "service": "my-service"  } ]
+	}
 }
