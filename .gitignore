@@ -165,3 +165,6 @@ dist
 .env*
 !.env.example
 .wrangler/
+
+# 生产部署的临时 wrangler 配置 (用法见 wrangler.jsonc 头部注释) / throwaway wrangler config for production deployments (see wrangler.jsonc header)
+wrangler.prod.jsonc
