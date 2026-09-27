@@ -51,7 +51,7 @@ https://<worker-host>/https://example.com/page?__proxy_token=<token>
 
 | Variable | Required | Notes |
 | --- | --- | --- |
-| `PROXY_TOKEN` | Yes | Access token. **Set as a secret only** (`npx wrangler secret put PROXY_TOKEN`); never put it in vars (a same-name var overwrites the remote secret on every deploy). Until it is set the proxy is fail-closed and rejects everything (503) |
+| `PROXY_TOKEN` | Yes | Access token; multiple comma-separated tokens are supported (any one matching passes; a token itself cannot contain a comma). **Set as a secret only** (`npx wrangler secret put PROXY_TOKEN`); never put it in vars (a same-name var overwrites the remote secret on every deploy). Until it is set the proxy is fail-closed and rejects everything (503) |
 | `ALLOWED_ORIGINS` | No | Extra origins allowed to read proxied responses cross-origin, comma-separated, e.g. `https://app.example.com` |
 
 ### Local development
@@ -59,7 +59,8 @@ https://<worker-host>/https://example.com/page?__proxy_token=<token>
 Create `.dev.vars` in the project root (already gitignored, do not commit it):
 
 ```
-PROXY_TOKEN=dev-token
+# multiple tokens, comma-separated
+PROXY_TOKEN=dev-token,dev-token-2
 ```
 
 Then:
@@ -91,7 +92,7 @@ The example config ships with production best practices pre-set: **the workers.d
 
 ## Security design
 
-- **Fail-closed authentication**: every proxy request is rejected until `PROXY_TOKEN` is set; tokens are compared in constant time
+- **Fail-closed authentication**: every proxy request is rejected until `PROXY_TOKEN` is set; multiple comma-separated tokens are supported (empty segments are filtered, an all-empty value counts as unconfigured); tokens are compared in constant time, iterating all of them without early exit so timing never reveals which one matched
 - **Credential isolation**: proxy-domain `Cookie` and the access token are never forwarded; the destination's `Set-Cookie` is dropped (proxied targets never share the proxy-domain cookie jar); `Authorization` is an explicit client credential and is forwarded
 - **CSP**: a restrictive CSP is always applied — proxied pages can only load resources from, and send requests to, the proxy itself
 - **CORS**: only the proxy's own origin or the `ALLOWED_ORIGINS` allowlist; client-controlled headers are never reflected

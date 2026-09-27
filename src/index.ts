@@ -5,7 +5,7 @@
  *   https://<worker-host>/https://<destination>      文本响应自动改写内部链接
  *   https://<worker-host>/~~/https://<destination>   原样直通, 不改写 body
  *
- * 认证 (fail-closed, PROXY_TOKEN secret 未配置时拒绝所有代理请求):
+ * 认证 (fail-closed, PROXY_TOKEN secret 未配置时拒绝所有代理请求; 支持逗号分隔的多个 token, 任一匹配即通过):
  *   - 请求头 X-Proxy-Token: <token>
  *   - 查询参数 ?__proxy_token=<token> (该参数会被剥离, 不转发给目标)
  *
@@ -15,7 +15,8 @@
  *   https://<worker-host>/https://<destination>      text responses get internal links rewritten
  *   https://<worker-host>/~~/https://<destination>   original passthrough, body untouched
  *
- * Authentication (fail-closed: all proxying is rejected until the PROXY_TOKEN secret is set):
+ * Authentication (fail-closed: all proxying is rejected until the PROXY_TOKEN secret is set; multiple
+ * comma-separated tokens are supported, any one matching passes):
  *   - request header X-Proxy-Token: <token>
  *   - query parameter ?__proxy_token=<token> (stripped, never forwarded to the destination)
  */
@@ -122,13 +123,15 @@ export default {
 	},
 } satisfies ExportedHandler<Env>;
 
-/** 校验访问令牌; 通过返回 null, 拒绝返回错误响应 (fail-closed) / Validate the access token; null on success, an error response when rejected (fail-closed) */
+/** 校验访问令牌 (逗号分隔的多个 token, 任一匹配即通过); 通过返回 null, 拒绝返回错误响应 (fail-closed) / Validate the access token (multiple comma-separated tokens, any one matching passes); null on success, an error response when rejected (fail-closed) */
 function checkProxyToken(request: Request, env: Env, url: URL): Response | null {
 	const func = "src.index.checkProxyToken";
 	// wrangler types 将 vars 值字面量化为 "", 运行时被 secret 覆盖为任意字符串, 显式放宽
 	// wrangler types literalizes vars values as "", at runtime the secret overrides them with an arbitrary string; widen explicitly
-	const expected: string = env.PROXY_TOKEN;
-	if (!expected) {
+	// 安全: 空段必须过滤, 否则 secureEqual("", "") 为 true, 空 token 将通过校验; 全部为空视为未配置 (fail-closed)
+	// security: empty segments must be filtered, otherwise secureEqual("", "") is true and an empty token would pass; all-empty counts as unconfigured (fail-closed)
+	const expectedTokens: string[] = env.PROXY_TOKEN.split(",").map((s) => s.trim()).filter((s) => s !== "");
+	if (expectedTokens.length === 0) {
 		console.warn("PROXY_TOKEN is not configured, rejecting request (fail-closed)", { func });
 		return new Response("Proxy is not configured with an access token. Set it via `wrangler secret put PROXY_TOKEN`.", {
 			status: 503,
@@ -136,11 +139,15 @@ function checkProxyToken(request: Request, env: Env, url: URL): Response | null 
 		});
 	}
 	const provided = request.headers.get(PROXY_TOKEN_HEADER) ?? url.searchParams.get(PROXY_TOKEN_QUERY) ?? "";
-	if (!secureEqual(provided, expected)) {
+	// 全量遍历不提前退出 (secureEqual 是 || 左操作数, 必定执行): 时序不泄露命中 token 的位置
+	// iterate all tokens without early exit (secureEqual is the || left operand, so it always runs): timing never reveals which position matched
+	let matched = false;
+	for (const expected of expectedTokens) matched = secureEqual(provided, expected) || matched;
+	if (!matched) {
 		console.warn("invalid or missing proxy token", { func });
 		return new Response("Forbidden", { status: 403, statusText: "Forbidden" });
 	}
-	console.debug("proxy token verified", { func });
+	console.debug("proxy token verified", { func, tokenCount: expectedTokens.length });
 	return null;
 }
 
