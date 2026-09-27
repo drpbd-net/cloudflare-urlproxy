@@ -51,7 +51,7 @@ https://<worker-host>/https://example.com/page?__proxy_token=<token>
 
 | 环境变量 | 必填 | 说明 |
 | --- | --- | --- |
-| `PROXY_TOKEN` | 是 | 访问令牌。**只以 secret 形式设置**（`npx wrangler secret put PROXY_TOKEN`），不要放进 vars（同名 vars 会在每次部署时覆盖远程 secret）。未配置时 fail-closed，拒绝所有代理请求（503） |
+| `PROXY_TOKEN` | 是 | 访问令牌，支持逗号分隔配置多个（任一匹配即通过；令牌本身不能包含逗号）。**只以 secret 形式设置**（`npx wrangler secret put PROXY_TOKEN`），不要放进 vars（同名 vars 会在每次部署时覆盖远程 secret）。未配置时 fail-closed，拒绝所有代理请求（503） |
 | `ALLOWED_ORIGINS` | 否 | 额外允许跨域读取代理响应的来源，逗号分隔，如 `https://app.example.com` |
 
 ### 本地开发
@@ -59,7 +59,8 @@ https://<worker-host>/https://example.com/page?__proxy_token=<token>
 在项目根目录创建 `.dev.vars`（已被 `.gitignore` 覆盖，勿提交）：
 
 ```
-PROXY_TOKEN=dev-token
+# 多 token 用逗号分隔 / multiple tokens, comma-separated
+PROXY_TOKEN=dev-token,dev-token-2
 ```
 
 然后：
@@ -91,7 +92,7 @@ rm wrangler.prod.jsonc
 
 ## 安全设计
 
-- **fail-closed 认证**：`PROXY_TOKEN` 未配置时拒绝一切代理请求；令牌使用常量时间比较
+- **fail-closed 认证**：`PROXY_TOKEN` 未配置时拒绝一切代理请求；支持逗号分隔多个令牌（空段自动过滤，全空视为未配置）；令牌使用常量时间比较，多令牌全量遍历、不提前退出，时序不泄露命中的是哪一个
 - **凭证隔离**：代理域 `Cookie` 与访问令牌不转发给目标；目标的 `Set-Cookie` 不透传（各被代理目标不共享代理域 cookie jar）；`Authorization` 属客户端显式凭证，保留转发
 - **CSP**：始终应用受限 CSP，被代理页面只能从代理自身加载资源、只能向代理发送请求
 - **CORS**：仅允许代理自身来源或 `ALLOWED_ORIGINS` 白名单，不反射请求方可控的头

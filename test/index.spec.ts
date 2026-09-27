@@ -81,6 +81,58 @@ describe("urlproxy worker", () => {
 		expect(response.status).toBe(403);
 	});
 
+	// 多 token 配置带空格, 顺带覆盖 trim / the multi-token config carries a space, covering trim as well
+	const MULTI_TOKEN_ENV = { ...env, PROXY_TOKEN: "token-alpha, token-beta", ALLOWED_ORIGINS: "" } as unknown as Env;
+
+	it("accepts each of multiple comma-separated tokens via header", async () => {
+		backendHandler = () => new Response("ok", { headers: { "content-type": "application/octet-stream" } });
+		for (const token of ["token-alpha", "token-beta"]) {
+			const response = await callProxy(`${PROXY_ORIGIN}/https://example.com/`, {
+				headers: { "x-proxy-token": token },
+			}, MULTI_TOKEN_ENV);
+			expect(response.status).toBe(200);
+		}
+	});
+
+	it("accepts any configured token via query parameter and still strips it from the destination URL", async () => {
+		backendHandler = () => new Response("ok", { headers: { "content-type": "application/octet-stream" } });
+		const response = await callProxy(
+			`${PROXY_ORIGIN}/https://api.example.com/v1/data?__proxy_token=token-beta`,
+			undefined,
+			MULTI_TOKEN_ENV,
+		);
+		expect(response.status).toBe(200);
+		expect(lastOutbound().url).toBe("https://api.example.com/v1/data");
+	});
+
+	it("rejects a token that is not in the comma-separated list", async () => {
+		const response = await callProxy(`${PROXY_ORIGIN}/https://example.com/`, {
+			headers: { "x-proxy-token": "token-gamma" },
+		}, MULTI_TOKEN_ENV);
+		expect(response.status).toBe(403);
+	});
+
+	it("does not accept the raw comma-joined config string as a single token", async () => {
+		const response = await callProxy(`${PROXY_ORIGIN}/https://example.com/`, {
+			headers: { "x-proxy-token": "token-alpha, token-beta" },
+		}, MULTI_TOKEN_ENV);
+		expect(response.status).toBe(403);
+	});
+
+	it("does not let an empty segment of a multi-token config accept an empty token", async () => {
+		const gapEnv = { ...env, PROXY_TOKEN: "token-alpha,,token-beta", ALLOWED_ORIGINS: "" } as unknown as Env;
+		const response = await callProxy(`${PROXY_ORIGIN}/https://example.com/`, {
+			headers: { "x-proxy-token": "" },
+		}, gapEnv);
+		expect(response.status).toBe(403);
+	});
+
+	it("treats a whitespace-and-comma-only PROXY_TOKEN as unconfigured (fail-closed)", async () => {
+		const blankEnv = { ...env, PROXY_TOKEN: " , , ", ALLOWED_ORIGINS: "" } as unknown as Env;
+		const response = await callProxy(`${PROXY_ORIGIN}/https://example.com/`, undefined, blankEnv);
+		expect(response.status).toBe(503);
+	});
+
 	it("forwards to the destination with a valid header token, stripping cookies and the token itself", async () => {
 		backendHandler = () => new Response("ok", { headers: { "content-type": "application/octet-stream" } });
 		const response = await callProxy(`${PROXY_ORIGIN}/https://api.example.com/v1/data?x=1`, {
